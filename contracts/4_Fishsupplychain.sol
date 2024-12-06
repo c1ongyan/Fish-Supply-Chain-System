@@ -21,6 +21,8 @@ contract SupplyChain is
 {
     uint256 public constant WEI_PER_TOKEN = 100;
 
+    uint256 public constant depositvalue = 10 ;
+
     // 铸造功能，仅限合约所有者
     function mint(address to, uint256 amount) external onlyOwner {
         _mint(to, amount);
@@ -116,6 +118,8 @@ contract SupplyChain is
         address distributorID; // Metamask-Ethereum address of the Distributor
         address retailerID; // Metamask-Ethereum address of the Retailer
         address consumerID; // Metamask-Ethereum address of the Consumer // ADDED payable
+        uint256 depositAmount; // 商品对应的押金金额
+        address depositPayer; // 支付该商品押金的地址（即出售方）
     }
 
     // Block number stuct
@@ -139,6 +143,9 @@ contract SupplyChain is
     event ForSaleByRetailer(uint256 productCode); //12
     event PurchasedByConsumer(uint256 productCode); //13
 
+    event DepositPaid(uint256 productCode, address payer, uint256 amount); // 通用的押金支付事件
+    event DepositRefundedInToken(uint256 productCode, address depositPayer, uint256 amount);
+    
     // Define a modifer that checks to see if _msgSender() == owner of the contract
     modifier only_Owner() {
         require(_msgSender() == Ownable.owner());
@@ -230,6 +237,11 @@ contract SupplyChain is
         require(items[_productCode].itemState == State.PurchasedByConsumer);
         _;
     }
+    // 定义修饰器来检查押金是否已支付且支付者是否正确
+    modifier depositPaidAndCorrectPayer(uint256 _productCode) {
+        require(items[_productCode].depositAmount >= depositvalue && items[_productCode].depositPayer == _msgSender(), "Deposit not paid or incorrect payer");
+        _;
+    }
 
 
     constructor() ERC20("FishToken", "FISH") Ownable(msg.sender) {
@@ -254,6 +266,8 @@ contract SupplyChain is
     function _make_payable(address x) internal pure returns (address payable) {
         return payable(address(uint160(x)));
     }
+
+
 
     /*
  1st step in supplychain
@@ -318,10 +332,36 @@ Allows fisher to sell product
         onlyFisher // check _msgSender() belongs to fisherRole
         producedByFisher(_productCode) // check items state has been produced
         verifyCaller(items[_productCode].ownerID) // check _msgSender() is owner
+        depositPaidAndCorrectPayer(_productCode)
     {
         items[_productCode].itemState = State.ForSaleByFisher;
         items[_productCode].productPrice = _price;
         emit ForSaleByFisher(_productCode);
+    }
+    //支付押金 至少10fishtoken
+    function payDeposit(uint256 _productCode, uint256 _depositAmount) 
+        public 
+        verifyCaller(items[_productCode].ownerID)
+    {
+        require(balanceOf(msg.sender) >= _depositAmount, "Not enough tokens to complete the purchase");
+        transfer(address(this), _depositAmount);
+
+        items[_productCode].depositAmount = _depositAmount;
+        items[_productCode].depositPayer = _msgSender();
+
+        emit DepositPaid(_productCode, _msgSender(), _depositAmount);
+    }
+    //  退还押金
+    function refundDepositInToken(uint256 _productCode) public {
+        Item storage item = items[_productCode];
+        require(item.depositAmount > 0, "No deposit to refund");
+        // 使用正确的方式检查合约持有的 FishToken 余额是否足够退还押金
+        require(balanceOf(address(this)) >= item.depositAmount, "Contract token balance insufficient to refund deposit");
+        // 改为使用 transferFrom 函数，从合约账户（已授权的情况下）将押金退还给支付押金的一方
+        bool transferSuccess = transferFrom(address(this), item.depositPayer, item.depositAmount);
+        require(transferSuccess, "Token transfer failed");
+        item.depositAmount = 0;
+        emit DepositRefundedInToken(_productCode, item.depositPayer, item.depositAmount);
     }
 
     /*
@@ -372,6 +412,10 @@ Allows distributor to purchase product
     {
         items[_productCode].itemState = State.ReceivedByDistributor; // update state
         emit ReceivedByDistributor(_productCode);
+        // 授权购买方（这里是分销商）可以从合约账户中转出对应押金金额的代币，假设当前调用者（分销商）就是后续要退还押金时操作的主体
+        _approve(address(this), msg.sender, items[_productCode].depositAmount);
+        // 然后调用退还押金函数
+        refundDepositInToken(_productCode);
     }
 
     /*
@@ -412,6 +456,7 @@ Allows distributor to purchase product
         onlyDistributor // check _msgSender() belongs to DistributorRole
         packagedByDistributor(_productCode)
         verifyCaller(items[_productCode].ownerID) // check _msgSender() is owner
+        depositPaidAndCorrectPayer(_productCode)
     {
         items[_productCode].itemState = State.ForSaleByDistributor;
         items[_productCode].productPrice = _price;
@@ -464,6 +509,10 @@ Allows distributor to purchase product
     {
         items[_productCode].itemState = State.ReceivedByRetailer;
         emit ReceivedByRetailer(_productCode);
+        // 授权购买方（这里是分销商）可以从合约账户中转出对应押金金额的代币，假设当前调用者（分销商）就是后续要退还押金时操作的主体
+        _approve(address(this), msg.sender, items[_productCode].depositAmount);
+        // 然后调用退还押金函数
+        refundDepositInToken(_productCode);
     }
 
     /*
